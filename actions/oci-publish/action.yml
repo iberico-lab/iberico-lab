@@ -1,0 +1,62 @@
+name: OCI publish
+description: >-
+  Push an OCI archive to the registry with regctl, then add the remaining tags
+  as server-side copies (nothing is uploaded twice). Run `registry-login` first.
+  Each step is retried: a blob that already arrived is skipped.
+
+inputs:
+  image:
+    description: Image reference without a tag, e.g. registry.mediumrare.ai/iberico-lab/asset-api.
+    required: true
+  tags:
+    description: Comma-separated tags. The first is imported, the rest are copied from it.
+    required: true
+  archive:
+    description: Path to the OCI archive (`--output type=oci,dest=...`). Removed after a successful push.
+    required: true
+  max-attempts:
+    description: Attempts per push or copy.
+    default: '4'
+
+outputs:
+  reference:
+    description: The first (pushed) reference, image:tag.
+    value: ${{ steps.publish.outputs.reference }}
+
+runs:
+  using: composite
+  steps:
+    - name: Import the archive and tag it
+      id: publish
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        TAGS: ${{ inputs.tags }}
+        ARCHIVE: ${{ inputs.archive }}
+        MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+      run: |
+        set -euo pipefail
+
+        with_retry() {
+          local attempt=1 delay=5
+          until "$@"; do
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::failed after ${attempt} attempts: $*" >&2
+              return 1
+            fi
+            echo "attempt ${attempt} failed; retrying in ${delay}s" >&2
+            sleep "${delay}"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+          done
+        }
+
+        IFS=',' read -ra all <<< "${TAGS}"
+        first="${all[0]}"
+        with_retry regctl image import "${IMAGE}:${first}" "${ARCHIVE}"
+        for t in "${all[@]:1}"; do
+          with_retry regctl image copy "${IMAGE}:${first}" "${IMAGE}:${t}"
+        done
+        rm -f "${ARCHIVE}"
+        echo "reference=${IMAGE}:${first}" >> "${GITHUB_OUTPUT}"
+        echo "published ${IMAGE}: ${TAGS}"

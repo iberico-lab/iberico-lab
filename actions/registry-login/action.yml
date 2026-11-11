@@ -1,0 +1,51 @@
+name: Registry login
+description: >-
+  Install regctl, log in to the Iberico registry and enable chunked uploads.
+  Cloudflare, which fronts the registry, rejects any single request body over
+  100 MB with 413, so every blob is sent in 50 MB chunks.
+
+inputs:
+  username:
+    description: Registry user (the `ci` account).
+    required: true
+  password:
+    description: Registry password.
+    required: true
+  registry:
+    description: Registry host.
+    default: registry.mediumrare.ai
+  regctl-version:
+    description: regctl release to install.
+    default: v0.11.7
+  blob-chunk:
+    description: Upload chunk size in bytes. Must stay under the 100 MB edge cap.
+    default: '50000000'
+
+runs:
+  using: composite
+  steps:
+    - name: Install regctl
+      uses: regclient/actions/regctl-installer@dd58ad94f76adb73d8ac1bf75ed25f01545d5b32 # v0.2.0
+      with:
+        release: ${{ inputs.regctl-version }}
+
+    # First, so a missing secret fails in seconds rather than after a multi-minute build.
+    - name: Log in and enable chunked uploads
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USERNAME: ${{ inputs.username }}
+        REGISTRY_PASSWORD: ${{ inputs.password }}
+        BLOB_CHUNK: ${{ inputs.blob-chunk }}
+      run: |
+        set -euo pipefail
+        missing=""
+        [ -n "${REGISTRY_USERNAME}" ] || missing="${missing} REGISTRY_USERNAME"
+        [ -n "${REGISTRY_PASSWORD}" ] || missing="${missing} REGISTRY_PASSWORD"
+        if [ -n "${missing}" ]; then
+          echo "::error::missing registry credential(s):${missing}."
+          exit 1
+        fi
+        printf '%s' "${REGISTRY_PASSWORD}" | regctl registry login "${REGISTRY}" -u "${REGISTRY_USERNAME}" --pass-stdin
+        # --blob-max 1 sends every blob in chunks, never as one request.
+        regctl registry set "${REGISTRY}" --blob-chunk "${BLOB_CHUNK}" --blob-max 1
